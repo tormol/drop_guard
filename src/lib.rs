@@ -28,7 +28,6 @@
 
 
 use std::ops::{Deref, DerefMut};
-use std::boxed::Box;
 use std::mem::ManuallyDrop;
 use std::ptr;
 
@@ -55,7 +54,7 @@ use std::ptr;
 /// ```
 pub struct DropGuard<T, F: FnOnce(T)> {
     data: ManuallyDrop<T>,
-    func: ManuallyDrop<Box<F>>,
+    func: ManuallyDrop<F>,
 }
 
 impl<T: Sized, F: FnOnce(T)> DropGuard<T, F> {
@@ -75,7 +74,7 @@ impl<T: Sized, F: FnOnce(T)> DropGuard<T, F> {
     pub fn new(data: T, func: F) -> DropGuard<T, F> {
         DropGuard {
             data: ManuallyDrop::new(data),
-            func: ManuallyDrop::new(Box::new(func)),
+            func: ManuallyDrop::new(func),
         }
     }
 }
@@ -134,7 +133,7 @@ impl<T,F: FnOnce(T)> Drop for DropGuard<T, F> {
         // This is OK because the fields are wrapped in `ManuallyDrop`
         // and will not be dropped by the compiler.
         let data: T = unsafe { ptr::read(&*self.data) };
-        let func: Box<F> = unsafe { ptr::read(&*self.func) };
+        let func: F = unsafe { ptr::read(&*self.func) };
         // Run the guard.
         // The call consumes both data and guard and therefore move them out
         // of the local variables. If the guard panics and unwinds,
