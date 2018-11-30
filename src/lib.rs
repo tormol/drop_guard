@@ -26,6 +26,10 @@
 //! ```
 //! 
 
+// Only the tests at the bottom of the file require std
+#![cfg_attr(not(test), no_std)]
+#![cfg(not(test))]
+extern crate core as std;
 
 use std::ops::{Deref, DerefMut};
 use std::mem::ManuallyDrop;
