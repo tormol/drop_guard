@@ -54,7 +54,7 @@ use std::ptr;
 /// }).join();
 /// ```
 pub struct DropGuard<T, F: FnOnce(T)> {
-    data: Option<T>,
+    data: ManuallyDrop<T>,
     func: ManuallyDrop<Box<F>>,
 }
 
@@ -74,7 +74,7 @@ impl<T: Sized, F: FnOnce(T)> DropGuard<T, F> {
     /// ```
     pub fn new(data: T, func: F) -> DropGuard<T, F> {
         DropGuard {
-            data: Some(data),
+            data: ManuallyDrop::new(data),
             func: ManuallyDrop::new(Box::new(func)),
         }
     }
@@ -93,7 +93,7 @@ impl<T, F: FnOnce(T)> Deref for DropGuard<T, F> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.data.as_ref().expect("the data is here until the drop")
+        &*self.data
     }
 }
 
@@ -110,7 +110,7 @@ impl<T, F: FnOnce(T)> Deref for DropGuard<T, F> {
 /// ```
 impl<T, F: FnOnce(T)> DerefMut for DropGuard<T, F> {
     fn deref_mut(&mut self) -> &mut T {
-        self.data.as_mut().expect("the data is here until the drop")
+        &mut*self.data
     }
 }
 
@@ -130,20 +130,16 @@ impl<T, F: FnOnce(T)> DerefMut for DropGuard<T, F> {
 /// ```
 impl<T,F: FnOnce(T)> Drop for DropGuard<T, F> {
     fn drop(&mut self) {
-        let mut data: Option<T> = None;
-        std::mem::swap(&mut data, &mut self.data);
-        
-        let data = self.data.take().expect("the data is here until the drop");
-        // Copy the guard into a local variable.
-        // This is OK because the field is wrapped in `ManuallyDrop`
-        // and will not be dropped by the compiler afterward.
-        let f: Box<F> = unsafe { ptr::read(&*self.func) };
-
+        // Copy the data and guard into local variables.
+        // This is OK because the fields are wrapped in `ManuallyDrop`
+        // and will not be dropped by the compiler.
+        let data: T = unsafe { ptr::read(&*self.data) };
+        let func: Box<F> = unsafe { ptr::read(&*self.func) };
         // Run the guard.
         // The call consumes both data and guard and therefore move them out
         // of the local variables. If the guard panics and unwinds,
         // data is dropped by a landing pad inside func.
-        f(data.expect("the data is here until the drop"));
+        func(data)
     }
 }
 
