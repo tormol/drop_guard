@@ -27,8 +27,10 @@
 //! 
 
 
-use std::ops::{Deref, DerefMut, Drop, FnMut};
+use std::ops::{Deref, DerefMut};
 use std::boxed::Box;
+use std::mem::ManuallyDrop;
+use std::ptr;
 
 /// The DropGuard will remain to `Send` and `Sync` from `T`.
 ///
@@ -51,12 +53,12 @@ use std::boxed::Box;
 ///     assert_eq!(0, a_list.len());
 /// }).join();
 /// ```
-pub struct DropGuard<T, F: FnMut(T)> {
+pub struct DropGuard<T, F: FnOnce(T)> {
     data: Option<T>,
-    func: Box<F>,
+    func: ManuallyDrop<Box<F>>,
 }
 
-impl<T: Sized, F: FnMut(T)> DropGuard<T, F> {
+impl<T: Sized, F: FnOnce(T)> DropGuard<T, F> {
     /// Creates a new guard taking in your data and a function.
     /// 
     /// ```
@@ -73,7 +75,7 @@ impl<T: Sized, F: FnMut(T)> DropGuard<T, F> {
     pub fn new(data: T, func: F) -> DropGuard<T, F> {
         DropGuard {
             data: Some(data),
-            func: Box::new(func),
+            func: ManuallyDrop::new(Box::new(func)),
         }
     }
 }
@@ -87,7 +89,7 @@ impl<T: Sized, F: FnMut(T)> DropGuard<T, F> {
 /// let val = DropGuard::new(42usize, |_| {});
 /// assert_eq!(42, *val);
 /// ```
-impl<T, F: FnMut(T)> Deref for DropGuard<T, F> {
+impl<T, F: FnOnce(T)> Deref for DropGuard<T, F> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -106,7 +108,7 @@ impl<T, F: FnMut(T)> Deref for DropGuard<T, F> {
 /// val.push(5);
 /// assert_eq!(4, val.len());
 /// ```
-impl<T, F: FnMut(T)> DerefMut for DropGuard<T, F> {
+impl<T, F: FnOnce(T)> DerefMut for DropGuard<T, F> {
     fn deref_mut(&mut self) -> &mut T {
         self.data.as_mut().expect("the data is here until the drop")
     }
@@ -126,12 +128,21 @@ impl<T, F: FnMut(T)> DerefMut for DropGuard<T, F> {
 /// });
 /// assert_eq!(42, *val);
 /// ```
-impl<T,F: FnMut(T)> Drop for DropGuard<T, F> {
+impl<T,F: FnOnce(T)> Drop for DropGuard<T, F> {
     fn drop(&mut self) {
         let mut data: Option<T> = None;
         std::mem::swap(&mut data, &mut self.data);
         
-        let ref mut f = self.func;
+        let data = self.data.take().expect("the data is here until the drop");
+        // Copy the guard into a local variable.
+        // This is OK because the field is wrapped in `ManuallyDrop`
+        // and will not be dropped by the compiler afterward.
+        let f: Box<F> = unsafe { ptr::read(&*self.func) };
+
+        // Run the guard.
+        // The call consumes both data and guard and therefore move them out
+        // of the local variables. If the guard panics and unwinds,
+        // data is dropped by a landing pad inside func.
         f(data.expect("the data is here until the drop"));
     }
 }
@@ -141,6 +152,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::cell::Cell;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn it_works() {
@@ -186,5 +199,36 @@ mod tests {
         fn assert_send<T: Send>(_: T) {}
         let g = DropGuard::new(vec![0], |_| {});
         assert_send(g);
+    }
+
+    #[test]
+    fn guard_runs_on_unwind() {
+        let mut was_unwinding = None;
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = DropGuard::new(&mut was_unwinding, |r| {
+                *r = Some(std::thread::panicking())
+            });
+            panic!();
+        }));
+        assert_eq!(was_unwinding, Some(true));
+    }
+
+    #[test]
+    fn closure_panics() {
+        let data_dropped = Cell::new(0);
+        let data = DropGuard::new((), |()| data_dropped.set(data_dropped.get()+1));
+        let captured_dropped = Cell::new(0);
+        let captured = DropGuard::new((), |()| captured_dropped.set(captured_dropped.get()+1));
+        let mut guard_called = 0;
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = DropGuard::new(data, |_data| {
+                guard_called += 1;
+                let _move = captured;
+                panic!();
+            });
+        }));
+        assert_eq!(guard_called, 1);
+        assert_eq!(data_dropped.get(), 1);
+        assert_eq!(captured_dropped.get(), 1);
     }
 }
